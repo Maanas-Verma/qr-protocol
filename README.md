@@ -2,6 +2,12 @@
 
 A plain HTML, CSS, and JavaScript application that transfers files between two laptops using their screens and cameras. File bytes travel in QR codes; no WebRTC, sockets, remote storage, or file-upload server is involved. Vite serves and bundles the app, `qrcode` generates codes, and `jsqr` decodes camera frames. Both QR libraries are bundled locally.
 
+## Hosted app
+
+Open [Lumen on GitHub Pages](https://maanas-verma.github.io/qr-protocol/) on both laptops and allow camera access. No local installation is required to use the hosted version.
+
+Pushes to `main` run the protocol tests, build with the `/qr-protocol/` asset base, and deploy `dist/` using `.github/workflows/deploy-pages.yml`. The workflow can also be run manually from GitHub Actions.
+
 ## Run on both laptops
 
 Requires Node.js 20.19+ or 22.12+.
