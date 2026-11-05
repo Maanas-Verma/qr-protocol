@@ -1,14 +1,14 @@
 import QRCode from 'qrcode';
-import jsQR from 'jsqr';
 import { Transfer, CHUNK, MAX_SIZE } from './protocol.js';
 const $ = id => document.getElementById(id);
 const format = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1048576).toFixed(2)} MiB`;
 let file, stream, cameraStarting = false, cameraGeneration = 0, cancelCameraRequest, downloadUrl;
 let processing = false, lastScan = '', lastScanTime = 0, cameraTimer, pendingQR, renderedQR, toastTimer, preparing = false, painting = false, lastPaintAt = -Infinity;
+let decoder, decodeTask, decodeSeq = 0;
 const frame = document.createElement('canvas');
 const context = frame.getContext('2d', { willReadFrequently: true });
 const terminal = state => ['complete', 'cancelled', 'rejected', 'error'].includes(state);
-const labels = { idle: 'Ready', offering: 'Waiting for acceptance', pending: 'Incoming file', sending: 'Sending', receiving: 'Receiving', verifying: 'Verifying file', complete: 'Complete', cancelled: 'Cancelled', rejected: 'Declined', error: 'Verification failed' };
+const labels = { idle: 'Ready', offering: 'Waiting for acceptance', pending: 'Incoming file', sending: 'Streaming', receiving: 'Receiving', verifying: 'Verifying file', complete: 'Complete', cancelled: 'Cancelled', rejected: 'Declined', error: 'Verification failed' };
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5500); }
 function log(type, message) {
   const logs = $('logs'); logs.querySelector('.log-empty')?.remove();
@@ -51,7 +51,7 @@ function render(s) {
   const hints = {
     offering: s.conflictingOffer ? 'Both laptops are sending. On one laptop, cancel and choose New transfer to receive instead.' : 'Accept the file on the other laptop. Keep both cameras on.',
     pending: 'Accept or decline the incoming file.',
-    sending: 'Keep both QR codes in view. Missed packets retry automatically.',
+    sending: 'Streaming packets. Confirmed packets automatically leave the loop.',
     receiving: 'Keep both QR codes in view. The file saves after verification.',
     verifying: 'All packets received. Checking the file before saving.',
     complete: s.role === 'receive' ? 'File verified. Keep this QR visible until the sender also shows Complete.' : 'The other laptop verified the file.',
@@ -61,7 +61,7 @@ function render(s) {
   };
   $('session-hint').textContent = active && !stream && !terminal(s.state) ? 'Camera is off. Enable it to continue this transfer.' : hints[s.state] || '';
   const count = s.meta?.count || 0;
-  const confirmed = s.role === 'receive' ? s.parts.size : s.next;
+  const confirmed = s.confirmedCount;
   const percent = count ? Math.floor(confirmed / count * 100) : 0;
   $('progress').textContent = `${percent}%`;
   document.querySelector('.progress-track').setAttribute('aria-valuenow', percent);
@@ -75,19 +75,23 @@ function render(s) {
   const group = Math.max(1, Math.ceil(count / 256));
   for (let start = 0; start < count; start += group) {
     const end = Math.min(start + group, count); let got = 0;
-    for (let i = start; i < end; i++) if (s.role === 'receive' ? s.parts.has(i) : i < s.next) got++;
+    let inFlight = false;
+    for (let i = start; i < end; i++) {
+      if (s.role === 'receive' ? s.parts.has(i) : s.acknowledged.has(i)) got++;
+      else if (s.role === 'send' && s.sent.has(i)) inFlight = true;
+    }
     const cell = document.createElement('span'); cell.className = 'packet-cell';
     if (got === end - start) cell.classList.add('confirmed');
-    else if (s.next >= start && s.next < end && ['sending', 'receiving'].includes(s.state)) cell.classList.add('current');
+    else if (inFlight && s.state === 'sending') cell.classList.add('current');
     cell.title = `Packet${group > 1 ? 's' : ''} ${start + 1}${group > 1 ? `–${end}` : ''}: ${got}/${end - start} confirmed`;
     grid.append(cell);
   }
   if (count) {
     const missing = [];
-    for (let i = 0; i < count && missing.length < 12; i++) if (s.role === 'receive' ? !s.parts.has(i) : i >= s.next) missing.push(i + 1);
+    for (let i = 0; i < count && missing.length < 12; i++) if (s.role === 'receive' ? !s.parts.has(i) : !s.acknowledged.has(i)) missing.push(i + 1);
     $('missing-detail').textContent = missing.length ? `Pending: ${missing.join(', ')}${count - confirmed > 12 ? ` … (${count - confirmed} total)` : ''}${group > 1 ? ` · ${group} packets/cell` : ''}` : s.state === 'complete' ? 'All packets confirmed. File verified.' : s.state === 'error' ? 'File checksum failed.' : 'All packets received. Verifying…';
   } else $('missing-detail').textContent = 'No active transfer.';
-  const captions = { offer: 'File offer', ack: 'Packet acknowledgment', done: 'Completion acknowledgment', cancel: 'Cancellation notice', reject: 'File declined', data: `Packet ${Math.min(s.next + 1, count)} of ${count}` };
+  const captions = { offer: 'File offer', ack: 'Batch acknowledgment', done: 'Completion acknowledgment', finish: 'Waiting for file verification', error: 'File verification failed', cancel: 'Cancellation notice', reject: 'File declined', data: `Streaming packet ${(s.out?.index ?? 0) + 1} of ${count}` };
   $('qr-caption').textContent = captions[s.out?.type] || '';
 }
 async function paintQR() {
@@ -97,7 +101,7 @@ async function paintQR() {
   painting = true; const raw = pendingQR;
   try {
     await QRCode.toCanvas($('qr'), raw, { width: 720, margin: 4, errorCorrectionLevel: 'M', color: { dark: '#171717ff', light: '#ffffffff' } });
-    renderedQR = raw; lastPaintAt = Date.now(); engine.markDisplayed(raw, lastPaintAt); render(engine);
+    renderedQR = raw; lastPaintAt = Date.now(); engine.markDisplayed(raw, lastPaintAt);
   } catch (error) { log('ERROR', `Could not display QR: ${error.message}`); }
   finally { painting = false; }
 }
@@ -153,6 +157,7 @@ function cameraUI() {
 }
 function stopCamera() {
   cameraGeneration++; clearTimeout(cameraTimer); cancelCameraRequest?.(); cancelCameraRequest = null;
+  stopDecoder();
   cameraStarting = false;
   stream?.getTracks().forEach(track => track.stop()); stream = null; $('video').srcObject = null;
   cameraUI();
@@ -164,7 +169,7 @@ async function startCamera(deviceId) {
   try {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw Error('Camera access needs HTTPS or localhost. Open this app using a localhost address on each laptop.');
     const cancelled = new Promise(resolve => { cancelCameraRequest = () => resolve(null); });
-    const request = navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then(media => {
+    const request = navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, audio: false }).then(media => {
       if (generation !== cameraGeneration) { media.getTracks().forEach(track => track.stop()); return null; }
       return media;
     });
@@ -189,6 +194,27 @@ async function startCamera(deviceId) {
     $('camera-error').textContent = message; $('camera-error').hidden = false; log('CAMERA', message); return false;
   } finally { if (generation === cameraGeneration) { cameraStarting = false; cancelCameraRequest = null; cameraUI(); } }
 }
+function stopDecoder() {
+  decoder?.terminate(); decoder = null;
+  if (decodeTask) { const task = decodeTask; decodeTask = null; clearTimeout(task.timeout); task.reject(Error('QR scanner stopped.')); }
+}
+function decodePixels(pixels) {
+  if (!decoder) {
+    decoder = new Worker(new URL('./scanner.worker.js', import.meta.url), { type: 'module' });
+    decoder.onmessage = ({ data }) => {
+      if (!decodeTask || data.id !== decodeTask.id) return;
+      const task = decodeTask; decodeTask = null; clearTimeout(task.timeout);
+      if (data.error) task.reject(Error(data.error)); else task.resolve(data.text);
+    };
+    decoder.onerror = event => { event.preventDefault(); stopDecoder(); };
+  }
+  return new Promise((resolve, reject) => {
+    const id = ++decodeSeq;
+    const timeout = setTimeout(stopDecoder, 5000);
+    decodeTask = { id, resolve, reject, timeout };
+    decoder.postMessage({ id, buffer: pixels.data.buffer, width: pixels.width, height: pixels.height }, [pixels.data.buffer]);
+  });
+}
 async function scan(generation) {
   if (!stream || generation !== cameraGeneration) return;
   const video = $('video');
@@ -199,18 +225,19 @@ async function scan(generation) {
       frame.width = Math.round(video.videoWidth * scale); frame.height = Math.round(video.videoHeight * scale);
       context.drawImage(video, 0, 0, frame.width, frame.height);
       const pixels = context.getImageData(0, 0, frame.width, frame.height);
-      const code = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'dontInvert' });
-      if (code && (code.data !== lastScan || Date.now() - lastScanTime > engine.displayInterval)) {
-        lastScan = code.data; lastScanTime = Date.now(); await engine.ingest(code.data);
+      const text = await decodePixels(pixels);
+      if (generation !== cameraGeneration || !stream) return;
+      if (text && (text !== lastScan || Date.now() - lastScanTime > engine.displayInterval)) {
+        lastScan = text; lastScanTime = Date.now(); await engine.ingest(text);
       }
     }
-  } catch (error) { log('SCAN', error.message); }
-  finally { processing = false; if (stream && generation === cameraGeneration) cameraTimer = setTimeout(() => scan(generation), 120); }
+  } catch (error) { if (stream && generation === cameraGeneration) log('SCAN', error.message); }
+  finally { processing = false; if (stream && generation === cameraGeneration) cameraTimer = setTimeout(() => scan(generation), 30); }
 }
 $('camera-toggle').onclick = () => startCamera($('camera-select').value);
 $('stop-camera').onclick = stopCamera;
 $('camera-select').onchange = () => { if (stream) startCamera($('camera-select').value); };
 $('clear-log').onclick = () => { $('logs').replaceChildren(); const empty = document.createElement('p'); empty.className = 'log-empty'; empty.textContent = 'No activity yet.'; $('logs').append(empty); };
-setInterval(() => { engine.tick(); paintQR(); }, 50);
+setInterval(() => { engine.tick(); paintQR(); }, 25);
 window.addEventListener('beforeunload', event => { if (engine.meta && !terminal(engine.state)) { event.preventDefault(); event.returnValue = ''; } });
-window.addEventListener('pagehide', () => { stream?.getTracks().forEach(track => track.stop()); });
+window.addEventListener('pagehide', () => { stream?.getTracks().forEach(track => track.stop()); stopDecoder(); });

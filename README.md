@@ -1,4 +1,4 @@
-# Lumen · QR Transfer Protocol (QRTP/1)
+# Lumen · QR Transfer Protocol (QRTP/2)
 
 A plain HTML, CSS, and JavaScript application that transfers files between two laptops using their screens and cameras. File bytes travel in QR codes; no WebRTC, sockets, remote storage, or file-upload server is involved. Vite serves and bundles the app, `qrcode` generates codes, and `jsqr` decodes camera frames. Both QR libraries are bundled locally.
 
@@ -38,31 +38,35 @@ The `dist/` directory can also be served by any static HTTPS server. Do not simp
 6. After all packets arrive and SHA-256 verification passes, the receiver initiates a browser download. The **Save received file** button remains available as a fallback. The browser controls the download location and any save prompt.
 7. Click **New transfer** on both laptops before the next file. Reloading clears all transfer state.
 
-Start with a tiny text file. Optical transfers are slow: the stop-and-wait protocol sends 384 bytes per acknowledged packet, and files approaching 5 MiB can take hours. Display timing adjusts automatically; there is no manual speed setting.
+Start with a tiny text file. Both laptops must load the current app: QRTP/2 is incompatible with the earlier stop-and-wait version, so refresh both pages before transferring. Files are still sent one at a time; packets of that file are streamed without waiting for individual acknowledgments.
 
-### Automatic timing
+### Streaming and automatic timing
 
-The initial minimum QR hold is 300 ms. After each valid data acknowledgment, the sender measures the round-trip latency from the actual QR paint, smooths it with an exponential average (80% previous, 20% new), and adjusts the minimum hold to 35% of that latency, bounded to 150–1200 ms. The receiver independently adjusts its acknowledgment display cadence using observed intervals between distinct valid packets. Both sides retain the current code until the protocol produces the next frame; no packets are skipped to hit a frame rate.
+The sender cycles through a sliding window of **32 unconfirmed packets**, each containing 384 bytes. Every 600 ms, the receiver displays a compact batch acknowledgment: a cumulative base and a 32-bit bitmap of received packets beyond that base. Successfully confirmed packets immediately leave the sender's loop. Missed packets stay in the loop; received out-of-order packets are retained. The window advances as gaps are filled, so the sender does not need to loop over the whole file.
 
-The retry timeout starts at 1800 ms and adapts to observed latency, bounded to 900–10000 ms. Consecutive retries back off by 1.5×, capped at 10 seconds. Scanner duplicate suppression follows the automatic hold interval.
+The initial display interval is 180 ms. Capture feedback from batches tunes it between 100 and 1000 ms: after at least eight reported transmission attempts, an 85% or better confirmation ratio speeds it up by 10%, while a ratio below 55% slows it down by 25%. If no fresh batch report arrives for three seconds, it also slows by 25%. The actual rate depends on the camera, focus, lighting, QR size, decoder speed, and dropped scans. No speed selector is exposed.
 
-**Average packet interval** is the arithmetic mean between distinct packet QRs actually painted on the sender, or distinct valid packets arriving at the receiver. Repeated scans/retries are not new interval samples. The value remains `—` until two packets have been observed; offer/acceptance time is excluded. It is a measured value, not the configured minimum hold or a promised transfer rate.
+A queued data QR must be painted before the protocol can issue another, so a busy browser cannot silently skip data frames. Decoding runs in a **Web Worker**, with one camera frame in flight at a time, keeping the main thread available for QR painting and the UI. Static offer, completion, cancellation, and error codes remain visible; their retry notifications back off from 1800 ms up to 10 seconds.
+
+**Average packet interval** is the arithmetic mean between first displays of distinct packets on the sender, or first valid arrivals of distinct packets on the receiver. Retransmissions do not create new samples, but time spent on retries remains part of the observed gaps. The value remains `—` until two distinct packets have been observed. Retries count actual repeated data packets.
 
 ## Wire protocol
 
-Each QR carries a JSON envelope with `v: 1`, a random transfer `id`, and a `type`:
+Each QR carries a JSON envelope with `v: 2`, a random transfer `id`, and a `type`:
 
 | Frame | Content | Behavior |
 | --- | --- | --- |
 | `offer` | name, MIME, size, count, SHA-256 | Repeated until the receiver explicitly accepts or declines. |
-| `ack` | `next` (zero-based next expected index) | `next: 0` accepts the offer; subsequent ACKs advance the sender one packet. |
-| `data` | zero-based index, Base64 data, CRC-32 | Repeated until acknowledged. Duplicates are safe; damaged packets are ignored. |
-| `done` | SHA-256 | Sent only after reassembly and whole-file verification; completes the sender. |
+| `ack` | `base`, eight-character hex `seen`, report `seq`, last captured frame `through` | Acceptance starts with base 0 and an empty bitmap. Subsequent reports acknowledge batches; bit offsets are relative to base and least-significant-bit first within each byte. |
+| `data` | packet index, frame `seq`, Base64 bytes, CRC-32 | Streamed on a timer. Unconfirmed indexes cycle within the current window; confirmed indexes are skipped. |
+| `finish` | transfer id | Sender has all packet acknowledgments and asks for the final checksum result. |
+| `done` | SHA-256 | Sent after successful reassembly and verification; finishes the sender. |
+| `error` | transfer id | File verification failed; neither side reports success. |
 | `reject` / `cancel` | transfer id | Ends the matching transfer. Repeated while the terminal screen remains open. |
 
-ACKs are cumulative. Only the currently expected ACK can advance the sender. The receiver retains packet indexes, shows which packets have not arrived, and waits for all packets before verifying the exact advertised length and SHA-256. Completion codes repeat so a lost final scan can recover. Offers, indexes, payload lengths, transfer IDs, and file sizes are validated before allocation or storage.
+The receiver accepts valid packets out of order within the fixed window. ACKs cumulatively confirm every index below `base`, and selectively confirm indexes represented in `seen`. Reports cannot acknowledge indexes the sender has not issued. Old report sequences are ignored, confirmed indexes never regress, and completion requires all packets plus the advertised SHA-256. A lost final confirmation recovers through the persistent completion code or repeated `finish` requests.
 
-All displayed packet numbers are one-based. The sender's confirmed count means acknowledged by the receiver; the receiver's confirmed count means received with valid CRC. For large files, the visual grid groups packets into up to 256 cells; hover to see the range. The numeric count is exact and the missing list shows the first 12 pending indexes plus the total.
+All displayed packet numbers are one-based. The sender's confirmed count is the exact number of distinct acknowledged indexes, including packets beyond a gap. The receiver's count is the number received with valid CRC. The grid shows every issued-but-unconfirmed group as in flight. For large files it groups packets into up to 256 cells; hover to see the range. The missing list shows the first 12 pending indexes and the exact total.
 
 ## Limits
 
@@ -79,8 +83,12 @@ npm test
 npm run build
 ```
 
-Node tests cover binary and empty files, explicit acceptance, lost frames at every handshake stage, retries, duplicate frames, CRC corruption, invalid metadata/ACKs, cancellation/rejection, file-hash failures, a full packet round trip through the real QR encoder and decoder, and automatic timing/averaging/backoff with an injected clock. These simulate the optical channel and do not establish real-world camera throughput or reliability; a physical two-laptop test is still required.
+Node tests cover binary/empty files, consent, window bounds, streaming before feedback, sparse/out-of-order receipt, removal of confirmed packets from the loop, loss of data and batch/final reports, stale reports, CRC and SHA-256 errors, invalid input, cancellation, renderer backpressure, adaptive capture timing, actual QR encode/decode, and simultaneous offers.
 
-Implementation: `src/protocol.js` owns the transport state machine, `src/app.js` owns cameras and UI, and `src/style.css` owns the responsive theme.
+For a browser integration check, run `npm run dev`, open `/tests/optical-loopback.html`, and click **Run optical loopback**. It renders real QR images, decodes them in the production worker, deliberately drops two packet scans and a batch report, then checks the reconstructed bytes. This generated-image test does not use a physical camera.
+
+A deterministic simulated channel with 400 ms latency each way transfers 80 packets in about 12.85 simulated seconds, versus a 64-second round-trip-only lower bound for stop-and-wait. This is a protocol simulation, **not a physical camera benchmark**. Real two-laptop throughput still needs measurement.
+
+Implementation: `src/protocol.js` owns the transport state machine, `src/app.js` owns cameras and UI, `src/scanner.worker.js` decodes frames off the main thread, and `src/style.css` owns the responsive theme.
 
 Libraries: [node-qrcode](https://github.com/soldair/node-qrcode), [jsQR](https://github.com/cozmo/jsQR).
