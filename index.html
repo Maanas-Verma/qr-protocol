@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#faf9f7"><meta name="description" content="Transfer files between laptops using QR codes and cameras."><title>Lumen · QR file transfer</title><link rel="stylesheet" href="/src/style.css"></head>
+<body>
+<main>
+  <header><div class="identity"><span class="brand-mark" aria-hidden="true">⌗</span><h1>Lumen <span>QR file transfer</span></h1></div><span id="transfer-status" class="status">Ready</span></header>
+  <p class="connection-note">Enable the camera on both laptops. Keep each camera pointed at the other screen’s QR code.</p>
+  <div class="transfer-layout">
+    <section class="card transfer-card" aria-labelledby="transfer-heading">
+      <div class="card-top"><h2 id="transfer-heading">File transfer</h2><span class="muted" id="transfer-role">Send or receive</span></div>
+      <div id="file-panel">
+        <label class="drop-zone" id="drop-zone" for="file-input"><input type="file" id="file-input"><span class="file-icon" aria-hidden="true">↑</span><strong id="file-name">Choose a file</strong><span id="file-detail">or drop it here · Up to 5 MiB</span></label>
+        <button class="button primary full" id="start" disabled>Choose a file to send</button>
+        <p class="field-note">To receive a file, just enable your camera.</p>
+      </div>
+      <div id="session" hidden>
+        <div class="session-file"><strong id="session-file-name"></strong><span id="session-file-size" class="muted"></span></div>
+        <div class="qr-stage"><canvas id="qr" aria-label="Outgoing protocol QR code"></canvas><span id="qr-placeholder" class="muted">Waiting for your response…</span></div>
+        <div class="qr-caption"><span id="qr-caption"></span><button class="text-button" id="expand">Enlarge QR</button></div>
+        <p class="session-hint" id="session-hint" role="status"></p>
+        <a class="button primary full" id="download" hidden>Save received file</a>
+        <div class="session-actions"><button class="button secondary" id="cancel">Cancel transfer</button><button class="button secondary full" id="reset" hidden>New transfer</button></div>
+      </div>
+    </section>
+    <section class="card camera-card" aria-labelledby="camera-heading">
+      <div class="card-top"><h2 id="camera-heading">Camera</h2><span class="status camera-status" id="camera-status">Off</span></div>
+      <div class="camera-viewport"><video id="video" autoplay muted playsinline></video><div id="camera-placeholder"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M8 5 10 3h4l2 2h4v14H4V5Z"/><circle cx="12" cy="12" r="4"/></svg><p>Camera is off</p></div><div class="scan-corners" aria-hidden="true"></div></div>
+      <div class="camera-actions"><button class="button primary" id="camera-toggle">Enable camera</button><button class="button secondary" id="stop-camera" hidden>Stop camera</button><label class="camera-input" for="camera-select"><span class="sr-only">Input device</span><select id="camera-select" aria-label="Input device"><option value="">Default camera</option></select></label></div>
+      <p class="camera-message" id="scan-status" role="status">Incoming files will ask for your approval.</p>
+      <p class="error-message" id="camera-error" role="alert" hidden></p>
+    </section>
+  </div>
+  <section class="card telemetry" aria-labelledby="monitor-heading">
+    <div class="card-top"><h2 id="monitor-heading">Packet monitor</h2><span id="progress" class="progress-label">0%</span></div>
+    <div class="progress-track" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar"></div></div>
+    <div class="stats"><div><span>Confirmed packets</span><strong id="packet-count">0 / 0</strong></div><div><span>Pending packets</span><strong id="missing-count">—</strong></div><div><span>Average packet interval <span class="auto-tag">Auto</span></span><strong id="average-interval">—</strong></div><div><span>Retries</span><strong id="retry-count">0</strong></div></div>
+    <div id="packet-map" class="packet-map" aria-label="Packet status grid"></div>
+    <div class="packet-footer"><div class="legend"><span><i class="confirmed"></i> Confirmed</span><span><i class="current"></i> In flight</span><span><i></i> Pending</span></div><span id="missing-detail">No active transfer.</span></div>
+  </section>
+  <section class="card activity" aria-labelledby="activity-heading"><div class="card-top"><h2 id="activity-heading">Protocol activity</h2><button class="text-button" id="clear-log">Clear</button></div><div id="logs" role="log" aria-live="polite"><p class="log-empty">No activity yet.</p></div></section>
+</main>
+<dialog id="offer-dialog" aria-labelledby="offer-title" aria-describedby="offer-description"><h2 id="offer-title">Accept incoming file?</h2><p id="offer-description"></p><p class="muted">Accept only if you expect this file from the other laptop.</p><div class="dialog-actions"><button class="button secondary" id="reject">Decline</button><button class="button primary" id="accept" autofocus>Accept file</button></div></dialog>
+<div id="toast" role="status" hidden></div><script type="module" src="/src/app.js"></script>
+</body></html>
